@@ -1,4 +1,36 @@
+import json
+
 from .alpha_vantage_common import _make_api_request, format_datetime_for_api
+from .errors import NoNewsError
+
+
+def _raise_if_empty_feed(payload, message: str) -> None:
+    """Raise ``NoNewsError`` when NEWS_SENTIMENT answered with no articles.
+
+    An empty window is a *successful* response whose ``feed`` is an empty list
+    (``{"items": "0", ..., "feed": []}``). Handed back as-is it reads to the
+    router as a served request and ends the vendor chain, so a configured
+    fallback — e.g. ``tool_vendors={"get_news": "alpha_vantage,firecrawl"}`` —
+    would never run.
+
+    Only a positively identified empty feed raises. A non-JSON body, a payload
+    without a ``feed`` key, or any shape this does not recognize passes through
+    untouched: mislabeling an unexpected response as "no news" would hide real
+    articles, which is worse than the missed fallback this prevents.
+    """
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+    elif isinstance(payload, dict):
+        parsed = payload
+    else:
+        return
+
+    feed = parsed.get("feed") if isinstance(parsed, dict) else None
+    if isinstance(feed, list) and not feed:
+        raise NoNewsError(message)
 
 
 def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
@@ -13,6 +45,10 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
 
     Returns:
         Dictionary containing news sentiment data or JSON string.
+
+    Raises:
+        NoNewsError: The feed came back empty, so the router can try the next
+            vendor in the chain.
     """
 
     params = {
@@ -21,7 +57,11 @@ def get_news(ticker, start_date, end_date) -> dict[str, str] | str:
         "time_to": format_datetime_for_api(end_date),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    response = _make_api_request("NEWS_SENTIMENT", params)
+    _raise_if_empty_feed(
+        response, f"No news found for {ticker} between {start_date} and {end_date}"
+    )
+    return response
 
 def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict[str, str] | str:
     """Returns global market news & sentiment data without ticker-specific filtering.
@@ -35,6 +75,10 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
 
     Returns:
         Dictionary containing global news sentiment data or JSON string.
+
+    Raises:
+        NoNewsError: The feed came back empty, so the router can try the next
+            vendor in the chain.
     """
     from datetime import datetime, timedelta
 
@@ -50,7 +94,11 @@ def get_global_news(curr_date, look_back_days: int = 7, limit: int = 50) -> dict
         "limit": str(limit),
     }
 
-    return _make_api_request("NEWS_SENTIMENT", params)
+    response = _make_api_request("NEWS_SENTIMENT", params)
+    _raise_if_empty_feed(
+        response, f"No global news found between {start_date} and {curr_date}"
+    )
+    return response
 
 
 def get_insider_transactions(symbol: str) -> dict[str, str] | str:
