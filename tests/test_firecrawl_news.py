@@ -4,6 +4,7 @@ hygiene, error classification, deduplication, and router integration.
 All API access is mocked, so these run without a network connection or a key.
 """
 import copy
+import json
 import unittest
 from unittest import mock
 
@@ -12,9 +13,17 @@ import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
-from tradingagents.dataflows import firecrawl_news, interface, yfinance_news
+from tradingagents.dataflows import (
+    alpha_vantage_news,
+    firecrawl_news,
+    interface,
+    yfinance_news,
+)
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.errors import NoNewsError
+
+# Alpha Vantage's successful "nothing in this window" body.
+_EMPTY_AV_FEED = json.dumps({"items": "0", "feed": []})
 
 _ARTICLES = [
     {
@@ -271,6 +280,32 @@ class FirecrawlRoutingTests(unittest.TestCase):
 
         self.assertEqual(out, "No news found for AAPL")
         self.assertNotIn("NO_DATA_AVAILABLE", out)
+
+    @mock.patch.dict("os.environ", {"FIRECRAWL_API_KEY": "test-key"})
+    def test_empty_alpha_vantage_feed_reaches_firecrawl(self):
+        # The other half of the chain contract: Alpha Vantage answers an empty
+        # window with a successful `{"items": "0", "feed": []}` body, which would
+        # otherwise be returned to the analyst as a served request.
+        set_config({"tool_vendors": {"get_news": "alpha_vantage,firecrawl"}})
+
+        with mock.patch.object(
+            alpha_vantage_news, "_make_api_request", return_value=_EMPTY_AV_FEED
+        ), mock.patch.object(firecrawl_news.requests, "post", return_value=_ok()):
+            out = interface.route_to_vendor("get_news", "AAPL", "2026-03-01", "2026-03-08")
+
+        self.assertIn("### Chipmaker beats estimates (source: reuters.com)", out)
+
+    @mock.patch.dict("os.environ", {"FIRECRAWL_API_KEY": "test-key"})
+    def test_empty_alpha_vantage_global_feed_reaches_firecrawl(self):
+        set_config({"tool_vendors": {"get_global_news": "alpha_vantage,firecrawl"}})
+
+        with mock.patch.object(
+            alpha_vantage_news, "_make_api_request", return_value=_EMPTY_AV_FEED
+        ), mock.patch.object(firecrawl_news.requests, "post", return_value=_ok()):
+            out = interface.route_to_vendor("get_global_news", "2026-03-08", 7, 10)
+
+        self.assertIn("## Global Market News, from 2026-03-01 to 2026-03-08", out)
+        self.assertIn("### Chipmaker beats estimates (source: reuters.com)", out)
 
     def test_missing_key_falls_through_to_the_next_vendor(self):
         set_config({"tool_vendors": {"get_news": "firecrawl,yfinance"}})
